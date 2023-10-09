@@ -1,3 +1,5 @@
 .gitignore
 scratch*
 .idea
+dist/
+*.egg-info
