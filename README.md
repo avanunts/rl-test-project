@@ -9,5 +9,5 @@ To run the code in google-colab run cell:
 then import the distribution by calling
 
 ```
-!python -m pip install --index-url https://test.pypi.org/simple/ --no-deps rl-test-project==0.0.1
+!python -m pip install --index-url https://test.pypi.org/simple/ --no-deps rl-test-project
 ```
