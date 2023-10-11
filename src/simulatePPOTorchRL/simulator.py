@@ -35,8 +35,10 @@ class LearningParams:
 class SimulatorParams:
     env_name: str
     device: str
-    layers_dims: list[int]
-    activation_func_type: str
+    policy_layers_dims: list[int]
+    policy_activation_func_type: str
+    value_layers_dims: list[int]
+    value_activation_func_type: str
     max_frames_per_episode: int
     num_episodes: int
     learning_params: LearningParams
@@ -46,16 +48,16 @@ class SimulatorParams:
 
     def policy_params(self, env: GymEnv) -> models.PolicyParams:
         return models.PolicyParams(
-            self.layers_dims,
-            self.activation_func_type,
+            self.policy_layers_dims,
+            self.policy_activation_func_type,
             self.device,
             env.action_spec.shape[0],
         )
 
     def value_params(self):
         return models.ValueParams(
-            self.layers_dims,
-            self.activation_func_type,
+            self.value_layers_dims,
+            self.value_activation_func_type,
             self.device
         )
 
