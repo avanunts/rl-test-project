@@ -36,8 +36,8 @@ def extract_models_params(params: SimulatorParams, action_space_dim: int) -> (Po
     )
 
 
-def match_activation_fn(activation_fn_type: str):
-    match activation_fn_type:
+def match_activation_fn(activation_fn_name: str):
+    match activation_fn_name:
         case 'tanh':
             return nn.Tanh
         case 'relu':

@@ -17,16 +17,20 @@ class LossParams:
     loss_critic_type: str
     critic_loss_coef: float
     samples_mc_entropy: int
+    clamp_log_prob: float
+    loss_debug_file: str
 
 
 class ClippedPPOLoss(TensorDictModuleBase):
     def __init__(self, actor: ProbabilisticTensorDictSequential, critic: TensorDictModule, params: LossParams):
         super().__init__()
-        self.in_keys = ['observation', 'action', 'tail_reward', 'sample_log_prob']
+        self.in_keys = ['observation', 'action', 'tail_reward', 'sample_log_prob', 'advantage']
         self.out_keys = ['loss_objective', 'loss_entropy', 'loss_critic']
         self.actor = actor
         self.critic = critic
         self.params = params
+        if self.params.loss_debug_file:
+            open(self.params.loss_debug_file, 'w').close()
 
     def _clip_bounds(self):
         return (
@@ -55,26 +59,28 @@ class ClippedPPOLoss(TensorDictModuleBase):
             entropy = dist.entropy()
         except NotImplementedError:
             x = dist.rsample((self.params.samples_mc_entropy,))
-            entropy = -dist.log_prob(x)
-        return entropy.unsqueeze(-1)
+            log_prob = dist.log_prob(x)
+            log_prob = torch.where(torch.isnan(log_prob), self.params.clamp_log_prob, log_prob)
+            entropy = -log_prob
+            self.log_entropies(entropy, x, dist)
+        return entropy
 
     def forward(self, td: TensorDict):
         self.critic(td)
-        with torch.no_grad():
-            advantage = td['tail_reward'] - td['state_value']
+        critic_loss = self.distance_loss(td['state_value'], td['tail_reward'], self.params.loss_critic_type)
 
         dist = self.actor.get_dist(td)
         log_prob = dist.log_prob(td['action'])
         log_weight = (log_prob - td['sample_log_prob']).unsqueeze(-1)
-        gain1 = log_weight.exp() * advantage
+        gain1 = log_weight.exp() * td['advantage']
         log_weight_clip = log_weight.clamp(*self._clip_bounds())
-        gain2 = log_weight_clip.exp() * advantage
+        gain2 = log_weight_clip.exp() * td['advantage']
         gain = torch.stack([gain1, gain2], -1).min(dim=-1)[0]
         gain_loss = -gain.mean()  # add minus, because we will minimize
 
         entropy = self.get_entropy_bonus(dist)
         entropy_loss = -self.params.entropy_coef * entropy.mean()
-        critic_loss = self.distance_loss(td['state_value'], td['tail_reward'], self.params.loss_critic_type)
+
         td_out = TensorDict({
             "loss_objective": gain_loss,
             "loss_critic": critic_loss,
@@ -82,6 +88,19 @@ class ClippedPPOLoss(TensorDictModuleBase):
             []
         )
         return td_out
+
+    def log_entropies(self, entropy: torch.Tensor, x: torch.Tensor, dist: Distribution):
+        with open(self.params.loss_debug_file, 'a') as file:
+            file.write(
+'''
+dist params: mean: {}, stddev: {}, affine loc: {}, affine scale: {}
+
+X: {}
+
+entropies: {}
+                
+'''.format(dist.base_dist.mean, dist.base_dist.stddev, dist.transforms[1].loc, dist.transforms[1].scale, x, entropy)
+            )
 
 
 

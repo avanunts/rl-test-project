@@ -9,11 +9,11 @@ from torch.utils.data import DataLoader
 
 from utils.simulator_params import SimulatorParams
 from utils.nets import get_value_net, get_policy_net, extract_models_params
-from .models import get_actor
-from .envs import get_env, EnvParams
-from .loss import ClippedPPOLoss, LossParams
-from .helpers import *
-from .normalizers import get_normalization_terms
+from simulatePPOTorchCustom.actor import get_actor
+from simulatePPOTorchCustom.envs import get_env, EnvParams
+from simulatePPOTorchCustom.loss import ClippedPPOLoss, LossParams
+from simulatePPOTorchCustom.helpers import *
+from simulatePPOTorchCustom.normalizers import get_normalization_terms
 
 
 def extract_env_params(params: SimulatorParams) -> EnvParams:
@@ -27,7 +27,9 @@ def extract_loss_params(params: SimulatorParams) -> LossParams:
         params.learning_params.entropy_coef,
         params.learning_params.loss_critic_type,
         params.learning_params.ciric_loss_coef,
-        params.learning_params.samples_mc_entropy
+        params.learning_params.samples_mc_entropy,
+        clamp_log_prob=params.clamp_log_prob,
+        loss_debug_file=params.entropy_debug_file_path,
     )
 
 
@@ -42,7 +44,7 @@ class Simulator:
         policy_params, value_params = extract_models_params(params, self.env.action_space.shape[0])
         policy_net = get_policy_net(policy_params)
         device = torch.device(params.device)
-        self.actor = get_actor(policy_net, self.env.action_space, device)
+        self.actor = get_actor(policy_net, self.env.action_space, device, params.clamp_log_prob)
         self.critic = get_value_net(value_params)
         self.init_lazy_layers()
 
@@ -57,12 +59,6 @@ class Simulator:
     def get_seed(self):
         self.env_seed += 1
         return self.env_seed - 1
-
-    def init_lazy_layers(self):
-        obs, _ = self.env_reset_normalized()
-        with torch.no_grad():
-            self.actor(torch.Tensor([obs]))
-            self.critic(torch.Tensor([obs]))
 
     def train_episode(self, loop_log):
         stacked_td = torch.stack(self.data_collector, dim=0).flatten()
@@ -93,14 +89,14 @@ class Simulator:
         self.data_collector = []
         with torch.no_grad():
             episode_log = defaultdict(list)
-            obs, _ = self.env_reset_normalized()
+            obs, _ = self.env.reset(seed=self.get_seed())
             done = False
             info = None
             while not done:
-                td = TensorDict({'observation': torch.Tensor([obs])}, batch_size=1).to(device=self.params.device)
+                td = TensorDict({'observation': torch.Tensor([obs])}, batch_size=1)
                 self.actor(td)
                 self.critic(td)
-                obs, reward, terminated, truncated, info = self.env_step_normalized(td)
+                obs, reward, terminated, truncated, info = self.env.step(td['action'].flatten().numpy())
                 td['reward'] = Tensor([[reward]])
 
                 episode_log['reward'].append(reward)
@@ -109,16 +105,19 @@ class Simulator:
                 self.data_collector.append(td)
             if truncated:
                 final_obs = info['final_observation']
-                # double input to overcome error in the BatchNorm1d layer
-                final_value = self.critic(torch.Tensor([final_obs]).to(device=self.params.device))
+                final_value = self.critic(torch.Tensor([final_obs]))
             else:
-                final_value = torch.Tensor([[0.0]]).to(device=self.params.device)
+                final_value = torch.Tensor([[0.0]])
             tail_reward_suffix = final_value
             gamma = self.params.learning_params.gamma
             for td in reversed(self.data_collector):
                 tail_reward = td['reward'] + gamma * tail_reward_suffix
                 td['tail_reward'] = tail_reward
                 tail_reward_suffix = tail_reward
+                self.critic(td)
+                td['advantage'] = td['tail_reward'] - td['state_value']
+                td.rename_key_('state_value', 'init_state_value')
+
         return episode_log
 
     def run_episodes(self):
@@ -132,18 +131,6 @@ class Simulator:
             print_stats_for_episode(loop_log)
 
         return loop_log
-
-    def env_reset_normalized(self):
-        obs, _ = self.env.reset(seed=self.get_seed())
-        return self.normalize_obs(obs), None
-
-    def env_step_normalized(self, td: TensorDict):
-        obs, reward, terminated, truncated, info = self.env.step(td['action'].flatten().numpy())
-        obs = self.normalize_obs(obs)
-        return obs, reward, terminated, truncated, info
-
-    def normalize_obs(self, obs):
-        return (obs - self.obs_mean) / self.obs_std
 
 
 

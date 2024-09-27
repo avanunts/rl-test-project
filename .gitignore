@@ -1,6 +1,7 @@
-.gitignore
 scratch*
-.idea
 dist/
 *.egg-info
 *__pycache__*
+*LOG*
+*log*
+.*
