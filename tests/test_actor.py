@@ -23,13 +23,11 @@ def test_policy_net():
     with torch.no_grad(): 
         loc, scale = policy_net(observations)
     
-    assert len(loc.shape) == 2
+    assert len(loc.shape) == 1
     assert loc.shape[0] == batch_size 
-    assert loc.shape[1] == 1
 
-    assert len(scale.shape) == 2
+    assert len(scale.shape) == 1
     assert scale.shape[0] == batch_size
-    assert scale.shape[1] == 1
     assert torch.all(scale > 0)
 
 def test_prob_module(): 

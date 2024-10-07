@@ -1,8 +1,9 @@
+from typing import Tuple
 import numpy as np
 import torch
 import gym 
 
-from src.simulatePPOTorchCustom.configs import ActorConfig, PolicyNetConfig, ValueNetConfig
+from src.simulatePPOTorchCustom.configs import ActorConfig, PolicyNetConfig, ValueNetConfig, LocScaleRegularizationConfig
 
 def stub_policy_net_conifg() -> PolicyNetConfig: 
     return PolicyNetConfig(
@@ -40,5 +41,18 @@ def stub_env(max_episode_steps: int=100_000) -> gym.Env:
     return gym.make(
         'InvertedPendulum-v4',
         max_episode_steps=max_episode_steps,
-        autoreset=True,
+        autoreset=False,
     )
+
+class StubAgent: 
+    def __init__(self):
+        rng = np.random.default_rng(seed=42) 
+        self.current_position = 0
+        self.actions = rng.random(size=100) - 0.5
+
+    def sample_action(self, observation: np.ndarray) -> Tuple[float, float]: 
+        action = self.actions[self.current_position]
+        log_prob = 0.0 
+        self.current_position = (self.current_position + 1) % len(self.actions)
+        return action, log_prob
+

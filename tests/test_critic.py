@@ -19,4 +19,3 @@ def test_critic():
     assert len(data_keys) == 2
     assert 'observation' in data_keys
     assert 'state_value' in data_keys
-    assert torch.all(data['state_value'] > 0)

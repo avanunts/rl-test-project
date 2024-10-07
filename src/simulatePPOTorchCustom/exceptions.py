@@ -1,0 +1,3 @@
+
+
+class NansInLossException(ValueError): pass

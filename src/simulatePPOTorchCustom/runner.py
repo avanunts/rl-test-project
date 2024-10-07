@@ -1,75 +1,55 @@
-from typing import Tuple, Any, List, Optional
+from typing import List, Optional
+from dataclasses import dataclass
 import gym
 import numpy as np 
-import torch 
-from torch import Tensor
-from tensordict.tensordict import TensorDict
-from tensordict.nn import TensorDictModule
 
-def run_episodes_sequence(
-    actor: TensorDictModule,
-    critic: TensorDictModule,
-    env: gym.Env, 
-    num_episodes: int,
-    gym_seeds: Optional[List[int]] = None,
-) -> Tuple[List[TensorDict], List[float]]: 
-    trajectories = []
-    for num_episode in range(num_episodes): 
-        if gym_seeds is not None: 
-            init_gym_obs, _ = env.reset(seed=gym_seeds[num_episode])    
-        else: 
-            init_gym_obs, _ = env.reset(seed=num_episode)
-        trajectory, final_value = run_episode(actor=actor, critic=critic, env=env, init_gym_obs=init_gym_obs)
-        append_tail_reward(trajectory, final_value)
-        trajectories.append(trajectory)
-    return torch.cat(trajectories, dim=0)
-    
+from simulatePPOTorchCustom.episode_output import EpisodeOutput
+from simulatePPOTorchCustom.abstract_agent import AbstractAgent
 
-def run_episode(
-    actor: TensorDictModule,
-    critic: TensorDictModule,
-    env: gym.Env, 
-    init_gym_obs: np.ndarray
-) -> Tuple[TensorDict, float]: 
+class Runner: 
+    def __init__(self, env: gym.Env) -> None:
+        self.env = env
+        self.env_seed = 0
     
-    all_frames_data = []
-    obs = convert_gym_obs_to_torch(init_gym_obs)
-    with torch.no_grad():
+    def run_episode(
+        self,
+        agent: AbstractAgent
+    ) -> EpisodeOutput: 
+        
+        output = EpisodeOutput()
+        observation, _ = self.env.reset(seed=self.env_seed)
+        self.env_seed += 1
         done = False
         while not done: 
-            frame_data = TensorDict({'observation': obs}, batch_size=1)
-            actor(frame_data)
-            critic(frame_data)
-            gym_obs, reward, terminated, truncated, info = env.step(frame_data['action'].flatten().numpy())
-            obs = convert_gym_obs_to_torch(gym_obs)
-            frame_data['reward'] = torch.Tensor([reward])
-            all_frames_data.append(frame_data)
+            action, log_prob = agent.sample_action(observation=observation)
+            next_observation, reward, terminated, truncated, _ = self.env.step(np.array([action]))
+            output.add_frame(
+                observation=observation, 
+                action=action,
+                log_prob=log_prob,
+                reward=reward
+            )
+            observation = next_observation
             done = terminated or truncated
         if truncated:
-            final_obs = info['final_observation']
-            final_value = critic(torch.Tensor([final_obs]))
-        else:
-            final_value = torch.Tensor([[0.0]])
-    all_frames_concat = torch.cat(all_frames_data)
-    key_map_rename = {
-        'loc': 'episode_loc', 
-        'scale': 'episode_scale', 
-        'action': 'episode_action', 
-        'sample_log_prob': 'episode_sample_log_prob', 
-        'state_value': 'episode_state_value'
-    }
-    for key, value in key_map_rename.items(): 
-        all_frames_concat.rename_key_(old_key=key, new_key=value)
-    return all_frames_concat, final_value
-        
-def convert_gym_obs_to_torch(gym_obs: np.ndarray) -> torch.Tensor: 
-    return torch.Tensor(gym_obs.reshape(1, -1))
+            output.add_final_observation(final_observation=observation)
+        return output
 
-def append_tail_reward(trajectory: TensorDict, final_value: Tensor): 
-    reward = trajectory['reward']
-    reverse_reward = torch.flip(torch.flatten(reward), dims=[0]) + final_value.flatten()
-    tail_reward = torch.flip(
-        torch.cumsum(reverse_reward, dim=0), 
-        dims=[0]
-    ).reshape(reward.shape)
-    trajectory['tail_reward'] = tail_reward
+    def run_episode_sequence(
+        self, 
+        agent: AbstractAgent,
+        target_num_frames: Optional[int], 
+        num_episodes: Optional[int],
+    ) -> List[EpisodeOutput]: 
+        if num_episodes is not None and target_num_frames is not None: 
+            raise ValueError(f'only one of two arguments target_num_frames or num_episodes must be not None, got both.')
+        
+        if num_episodes is not None: 
+            return [self.run_episode(agent=agent) for _ in range(num_episodes)]
+        
+        num_frames = 0
+        results = []
+        while num_frames < target_num_frames: 
+            results.append(self.run_episode(agent=agent))
+            num_frames += len(results[-1].observations)
+        return results

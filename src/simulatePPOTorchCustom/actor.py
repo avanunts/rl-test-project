@@ -57,8 +57,8 @@ class PolicyNet(torch.nn.Module):
         
     def forward(self, x): 
         hidden_layers = self.hidden_layers_module(x)
-        loc = self.loc(hidden_layers)
-        scale = torch.abs(self.scale(hidden_layers)) # in order to have positive scale in the result
+        loc = self.loc(hidden_layers)[:, 0]
+        scale = torch.abs(self.scale(hidden_layers))[:, 0] # in order to have positive scale in the result
         return loc, scale
     
 
@@ -73,9 +73,8 @@ def get_prob_module(**tanh_normal_affine_1d_kwargs):
     )
 
 class TanhNormalAffine1d(TransformedDistribution):
-    def __init__(self, loc, scale, tanh_min, tanh_max, clamp_log_prob):
-        self.clamp_log_prob = clamp_log_prob
-        self.validate_clamp_log_prob()
+    def __init__(self, loc, scale, tanh_min, tanh_max, clamp_log_prob, samples_mc_entropy=20):
+        self.samples_mc_entropy = samples_mc_entropy
         super().__init__(
             Normal(loc, scale),
             [
@@ -87,9 +86,7 @@ class TanhNormalAffine1d(TransformedDistribution):
             ]
         )
 
-    def validate_clamp_log_prob(self): 
-        assert self.clamp_log_prob < 0
-
-    def log_prob(self, x):
-        result = super().log_prob(x)
-        return torch.where(torch.isnan(result), self.clamp_log_prob, result)
+    def entropy(self): 
+        x = self.rsample((self.samples_mc_entropy,))
+        log_prob = self.log_prob(x)
+        return -log_prob.mean(dim=0)

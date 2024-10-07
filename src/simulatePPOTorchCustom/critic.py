@@ -28,8 +28,7 @@ class ValueNet(nn.Module):
         self.module = nn.Sequential(OrderedDict(hidden_layers + [last_layer]))
 
     def forward(self, x): 
-        value_with_sign = self.module.forward(x)
-        return torch.abs(value_with_sign)
+        return self.module.forward(x)[:, 0]
 
 def get_critic(value_net_config: ValueNetConfig): 
     value_net = ValueNet(value_net_config=value_net_config)

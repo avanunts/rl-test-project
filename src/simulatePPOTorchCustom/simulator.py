@@ -1,137 +1,58 @@
-from collections import defaultdict
-from tqdm import tqdm
+from typing import List
 
-import torch
-from tensordict.tensordict import TensorDict
-from torch import Tensor
-from torch.utils.data import DataLoader
+import gym 
+import numpy as np 
 
+from dataclasses import dataclass
+from simulatePPOTorchCustom.configs import SimulatorConfig
+from simulatePPOTorchCustom.exceptions import NansInLossException
+from simulatePPOTorchCustom.runner import Runner
+from simulatePPOTorchCustom.agent import Agent, DatasetMetrics
+from simulatePPOTorchCustom.episode_output import EpisodeOutput
+from simulatePPOTorchCustom.train_actor import ActorTrainLog
+from simulatePPOTorchCustom.train_critic import CriticTrainLog
 
-from utils.simulator_params import SimulatorParams
-from utils.nets import get_value_net, get_policy_net, extract_models_params
-from simulatePPOTorchCustom.actor import get_actor
-from simulatePPOTorchCustom.envs import get_env, EnvParams
-from simulatePPOTorchCustom.loss import ClippedPPOLoss, LossParams
-from simulatePPOTorchCustom.helpers import *
-from simulatePPOTorchCustom.normalizers import get_normalization_terms
+@dataclass
+class SimulationEpochResults: 
+    dataset_metrics: DatasetMetrics
+    critic_train_log: CriticTrainLog
+    actor_train_log: ActorTrainLog
 
-
-def extract_env_params(params: SimulatorParams) -> EnvParams:
-    return EnvParams(params.env_name, params.max_frames_per_episode)
-
-
-def extract_loss_params(params: SimulatorParams) -> LossParams:
-    return LossParams(
-        params.learning_params.gamma,
-        params.learning_params.gamma,
-        params.learning_params.entropy_coef,
-        params.learning_params.loss_critic_type,
-        params.learning_params.ciric_loss_coef,
-        params.learning_params.samples_mc_entropy,
-        clamp_log_prob=params.clamp_log_prob,
-        loss_debug_file=params.entropy_debug_file_path,
-    )
-
-
-class Simulator:
-    def __init__(self, params: SimulatorParams):
-        self.params = params
-        self.env_seed = params.random_seed_gym
-        torch.manual_seed(params.random_seed_torch)
-        self.env = get_env(extract_env_params(params))
-        self.obs_mean, self.obs_std = get_normalization_terms(params.env_name)
-
-        policy_params, value_params = extract_models_params(params, self.env.action_space.shape[0])
-        policy_net = get_policy_net(policy_params)
-        device = torch.device(params.device)
-        self.actor = get_actor(policy_net, self.env.action_space, device, params.clamp_log_prob)
-        self.critic = get_value_net(value_params)
-        self.init_lazy_layers()
-
-        loss_params = extract_loss_params(params)
-        self.loss_module = ClippedPPOLoss(self.actor, self.critic, loss_params)
-        self.optim = torch.optim.Adam(self.loss_module.parameters(), params.learning_params.lr)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optim, params.num_episodes, params.learning_params.cosine_lr_min_ratio * params.learning_params.lr
+class Simulator: 
+    def __init__(self, simulator_config: SimulatorConfig): 
+        self.simulator_config = simulator_config
+        env = gym.make(
+            'InvertedPendulum-v4',
+            max_episode_steps=simulator_config.env_max_episode_steps,
+            autoreset=False,
         )
-        self.data_collector = []
+        self.runner = Runner(env=env)
+        self.agent = Agent(agent_config=simulator_config.agent_config)
 
-    def get_seed(self):
-        self.env_seed += 1
-        return self.env_seed - 1
+        self.results = []
 
-    def train_episode(self, loop_log):
-        stacked_td = torch.stack(self.data_collector, dim=0).flatten()
-        self.data_collector = []
-        dataloader = DataLoader(
-            stacked_td,
-            batch_size=self.params.learning_params.batch_size,
-            shuffle=True,
-            collate_fn=lambda x: x
-        )
-        lr = self.optim.param_groups[0]["lr"]
-        for _ in tqdm(range(self.params.learning_params.num_epochs)):
-            for data in dataloader:
-                loss_vals = self.loss_module(data)
-                loss_value = (
-                        loss_vals["loss_objective"]
-                        + loss_vals["loss_critic"]
-                        + loss_vals["loss_entropy"]
-                )
-                loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(self.loss_module.parameters(), self.params.learning_params.max_grad_norm)
-                self.optim.step()
-                self.optim.zero_grad()
-        self.scheduler.step()
-        loop_log['lr'].append(lr)
+    def simulate(self, num_epochs: int): 
+        for _ in range(num_epochs): 
+            episodes_outputs = self.runner.run_episode_sequence(
+                agent=self.agent, 
+                target_num_frames=self.simulator_config.target_num_frames_for_train_val,
+                num_episodes=None,
+            )
 
-    def run_episode(self):
-        self.data_collector = []
-        with torch.no_grad():
-            episode_log = defaultdict(list)
-            obs, _ = self.env.reset(seed=self.get_seed())
-            done = False
-            info = None
-            while not done:
-                td = TensorDict({'observation': torch.Tensor([obs])}, batch_size=1)
-                self.actor(td)
-                self.critic(td)
-                obs, reward, terminated, truncated, info = self.env.step(td['action'].flatten().numpy())
-                td['reward'] = Tensor([[reward]])
+            print(f'Num episodes: {len(episodes_outputs)}, total frames: {sum([x.length() for x in episodes_outputs])}')
 
-                episode_log['reward'].append(reward)
-                episode_log['info'].append(info)
-                done = terminated or truncated
-                self.data_collector.append(td)
-            if truncated:
-                final_obs = info['final_observation']
-                final_value = self.critic(torch.Tensor([final_obs]))
-            else:
-                final_value = torch.Tensor([[0.0]])
-            tail_reward_suffix = final_value
-            gamma = self.params.learning_params.gamma
-            for td in reversed(self.data_collector):
-                tail_reward = td['reward'] + gamma * tail_reward_suffix
-                td['tail_reward'] = tail_reward
-                tail_reward_suffix = tail_reward
-                self.critic(td)
-                td['advantage'] = td['tail_reward'] - td['state_value']
-                td.rename_key_('state_value', 'init_state_value')
+            try: 
+                dataset_metrics, critic_train_log, actor_train_log = self.agent.train_actor_critic(episodes_outputs)
+            except NansInLossException as e: 
+                print('Stopped train actor because of the raised exception')
+                print(f'Exception message: {e}')
+                return 
 
-        return episode_log
+            self.results.append(SimulationEpochResults(
+                dataset_metrics=dataset_metrics,
+                critic_train_log=critic_train_log,
+                actor_train_log=actor_train_log
+            ))
 
-    def run_episodes(self):
-        loop_log = defaultdict(list)
-        for i in range(self.params.num_episodes):
-            episode_log = self.run_episode()
-            self.train_episode(loop_log)
-            step_count = len(episode_log['reward'])
-            loop_log['avg_reward'].append(sum(episode_log['reward']) / step_count)
-            loop_log['step_count'].append(step_count)
-            print_stats_for_episode(loop_log)
-
-        return loop_log
-
-
-
-
+    def get_results(self) -> List[SimulationEpochResults]: 
+        return self.results
