@@ -62,6 +62,15 @@ class ActorTrainConfigSchedule:
     max_entropy_to_objective_loss_ratio: float
     updates_on_episode_length: List[ActorConfigUpdateOnMinEpisodeLength]
 
+@dataclass 
+class CriticConfigUpdateOnAverageEpisodeLength: 
+    average_episode_length: int
+    new_gamma: float
+    new_critic_lr: float
+
+@dataclass
+class CriticTrainConfigSchedule: 
+    updates_on_episode_length: List[CriticConfigUpdateOnAverageEpisodeLength]
 
 @dataclass
 class AgentConfig: 
@@ -71,8 +80,8 @@ class AgentConfig:
     actor_train_config: ActorTrainConfig
     val_ratio: float
     gamma: float
-    critic_lr_multiplicators: List[float]
     actor_train_config_schedule: ActorTrainConfigSchedule
+    critic_train_config_schedule: CriticTrainConfigSchedule
     
 
 @dataclass

@@ -22,25 +22,11 @@ class DatasetMetrics:
     min_num_frames_per_episode: float
     tail_reward_distribution_bins: Tuple[np.ndarray, np.ndarray]
 
-class CriticLREpochSchedule: 
-    def __init__(self, lr_multiplication_updates: List[float]) -> None:
-        self.lr_multiplication_updates = lr_multiplication_updates
-        self.curr_epoch = 0
-    
-    def get_next_epoch_lr(self, lr: float) -> float: 
-        if self.curr_epoch >= len(self.lr_multiplication_updates): 
-            new_lr = lr * self.lr_multiplication_updates[-1]
-        else: 
-            new_lr = lr * self.lr_multiplication_updates[self.curr_epoch]
-        self.curr_epoch += 1
-        return new_lr
-
 class Agent(AbstractAgent): 
     def __init__(self, agent_config: AgentConfig) -> None:
         self.config = agent_config
         self.actor = get_actor(config=agent_config.actor_config)
         self.critic = get_critic(value_net_config=agent_config.value_net_config)
-        self.critic_lr_schedule = CriticLREpochSchedule(lr_multiplication_updates=agent_config.critic_lr_multiplicators)
 
     def sample_action(self, observation: np.ndarray) -> Tuple[float, float]: 
         tensor_observation = TensorDict({'observation': observation.astype(np.float32).reshape(1, -1)}, batch_size=1)
@@ -50,12 +36,12 @@ class Agent(AbstractAgent):
     
     def update_actor_train_config(self, simulations_results: DatasetMetrics):
         min_num_frames_thresholds = [x.min_episode_length for x in self.config.actor_train_config_schedule.updates_on_episode_length]
-        i_bin = -1 
-        while len(min_num_frames_thresholds) > i_bin + 1 and simulations_results.min_num_frames_per_episode > min_num_frames_thresholds[i_bin + 1]: 
-            i_bin += 1
-        if i_bin == -1: 
+        i = -1 
+        while len(min_num_frames_thresholds) > i + 1 and simulations_results.min_num_frames_per_episode > min_num_frames_thresholds[i + 1]: 
+            i += 1
+        if i == -1: 
             return 
-        update_params = self.config.actor_train_config_schedule.updates_on_episode_length[i_bin]
+        update_params = self.config.actor_train_config_schedule.updates_on_episode_length[i]
         if self.config.actor_train_config.learning_rate > update_params.new_actor_lr:
             self.config.actor_train_config.learning_rate = update_params.new_actor_lr
             self.config.actor_train_config.ppo_loss_config.ppo_eps = update_params.new_ppo_eps
@@ -65,6 +51,23 @@ class Agent(AbstractAgent):
                   lr: {self.config.actor_train_config.learning_rate}, 
                   ppo_eps: {self.config.actor_train_config.ppo_loss_config.ppo_eps}, 
                   entropy_coeff: {self.config.actor_train_config.ppo_loss_config.entropy_coeff}
+                  ''')
+            
+    def update_critic_train_config(self, simulation_results: DatasetMetrics): 
+        avg_num_frames_thresholds = [x.average_episode_length for x in self.config.critic_train_config_schedule.updates_on_episode_length]
+        i = -1
+        while len(avg_num_frames_thresholds) > i + 1 and simulation_results.average_num_frames_per_episode > avg_num_frames_thresholds[i + 1]: 
+            i += 1
+        if i == -1: 
+            return 
+        update_params = self.config.critic_train_config_schedule.updates_on_episode_length[i]
+        if self.config.gamma < update_params.new_gamma: 
+            self.config.gamma = update_params.new_gamma
+            self.config.critic_train_config.learning_rate = update_params.new_critic_lr
+            print('Updated critic train config')
+            print(f'''
+                    lr: {self.config.critic_train_config.learning_rate}
+                    gamma: {self.config.gamma}
                   ''')
 
     def update_entropy_coeff(self, mean_abs_objective_loss: float, mean_abs_entropy_loss: float): 
@@ -106,6 +109,7 @@ class Agent(AbstractAgent):
         )
 
         self.update_actor_train_config(simulations_results=dataset_metrics)
+        self.update_critic_train_config(simulation_results=dataset_metrics)
 
         train_val_threshold = int(dataset_size * (1 - self.config.val_ratio))
         train_dataset = dataset[:train_val_threshold]
@@ -148,10 +152,6 @@ class Agent(AbstractAgent):
             mean_abs_entropy_loss=mean_abs_entropy_loss,
             mean_abs_objective_loss=mean_abs_objective_loss,
         )
-
-        curr_critic_lr = self.config.critic_train_config.learning_rate
-        new_critic_lr = self.critic_lr_schedule.get_next_epoch_lr(curr_critic_lr)
-        self.config.critic_train_config.learning_rate = new_critic_lr
 
         return dataset_metrics, critic_train_log, actor_train_log
 
