@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -7,69 +6,33 @@ from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 from torchrl.data.replay_buffers.storages import LazyTensorStorage
-from torchrl.envs.libs.gym import GymEnv
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 from torchrl.envs.utils import check_env_specs, ExplorationType, set_exploration_type
 
 from . import envs, models, helpers
+from ..utils.simulator_params import SimulatorParams
+from ..utils.nets import get_policy_net, get_value_net, extract_models_params
 
 LAMBDA = 1.0
-CRITIC_COEF = 1.0
 
 
-@dataclass
-class LearningParams:
-    gamma: float
-    clip_epsilon: float
-    entropy_coef: float
-    batch_size: int
-    num_epochs: int
-    lr: float
-    cosine_lr_min_ratio: float
-    max_grad_norm: float
-    loss_critic_type: str
-
-
-@dataclass
-class SimulatorParams:
-    env_name: str
-    device: str
-    policy_layers_dims: list[int]
-    policy_activation_func_type: str
-    value_layers_dims: list[int]
-    value_activation_func_type: str
-    max_frames_per_episode: int
-    num_episodes: int
-    learning_params: LearningParams
-
-    def env_params(self) -> envs.EnvParams:
-        return envs.EnvParams(self.env_name, self.device, self.max_frames_per_episode)
-
-    def policy_params(self, env: GymEnv) -> models.PolicyParams:
-        return models.PolicyParams(
-            self.policy_layers_dims,
-            self.policy_activation_func_type,
-            self.device,
-            env.action_spec.shape[0],
-        )
-
-    def value_params(self):
-        return models.ValueParams(
-            self.value_layers_dims,
-            self.value_activation_func_type,
-            self.device
-        )
+def extract_env_params(params: SimulatorParams) -> envs.EnvParams:
+    return envs.EnvParams(params.env_name, params.device, params.max_frames_per_episode)
 
 
 def simulate(params: SimulatorParams):
-    env = envs.get_env(params.env_params())
+    env_params = extract_env_params(params)
+    env = envs.get_env(env_params)
     env.transform[0].init_stats(num_iter=1000, reduce_dim=0, cat_dim=0)  # init loc and scale for states normalization
     print('Normalization loc:   ' + str(env.transform[0].loc))
     print('Normalization scale: ' + str(env.transform[0].scale))
     check_env_specs(env)
-    actor = models.get_actor(params.policy_params(env), env.action_spec)
-    critic = models.get_critic(params.value_params())
+
+    policy_params, value_params = extract_models_params(params, env.action_spec.shape[0])
+    policy_net = get_policy_net(policy_params)
+    actor = models.get_actor(policy_net, env.action_spec)
+    critic = get_value_net(value_params)
 
     # init lazy layers
     actor(env.reset())
@@ -100,7 +63,7 @@ def simulate(params: SimulatorParams):
         entropy_bonus=bool(params.learning_params.entropy_coef),
         entropy_coef=params.learning_params.entropy_coef,
         value_target_key=advantage_module.value_target_key,
-        critic_coef=CRITIC_COEF,
+        critic_coef=params.learning_params.ciric_loss_coef,
         gamma=params.learning_params.gamma,
         loss_critic_type=params.learning_params.loss_critic_type,
     )
